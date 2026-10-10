@@ -1,5 +1,5 @@
 import os
-from cs50 import SQL
+import sqlite3
 from flask import Flask, flash, jsonify, redirect, render_template, request, session
 import google.generativeai as genai
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -15,61 +15,65 @@ from helpers import (
 from translations import TRANSLATIONS
 
 app = Flask(__name__)
-
-# استخدام Cookie-based Sessions بدلاً من Flask-Session للتوافق التام مع Vercel
 app.secret_key = os.environ.get("SECRET_KEY", "2bsure_super_secret_key_123")
 
 app.config["UPLOAD_FOLDER"] = (
     "/tmp" if os.environ.get("VERCEL") else "static/uploads"
 )
-
-# تهيئة مسار قاعدة البيانات للعمل على البيئة السحابية بدون أخطاء صلاحيات الكتابة
-db_path = (
-    "sqlite:///safety.db"
-    if not os.environ.get("VERCEL")
-    else "sqlite:////tmp/safety.db"
-)
-db = SQL(db_path)
-
 os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
-# إنشاء الجداول تلقائياً عند التشغيل الأول
-db.execute(
-    """
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE,
-    hash TEXT NOT NULL,
-    lang TEXT DEFAULT 'en',
-    dietary_restriction TEXT DEFAULT 'none'
-);
-"""
-)
+# مسار قاعدة البيانات
+DB_FILE = "/tmp/safety.db" if os.environ.get("VERCEL") else "safety.db"
 
-db.execute(
-    """
-CREATE TABLE IF NOT EXISTS user_allergens (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    allergen_name TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-);
-"""
-)
 
-db.execute(
+def get_db():
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL UNIQUE,
+        hash TEXT NOT NULL,
+        lang TEXT DEFAULT 'en',
+        dietary_restriction TEXT DEFAULT 'none'
+    );
     """
-CREATE TABLE IF NOT EXISTS search_history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    product_name TEXT,
-    ingredients_text TEXT NOT NULL,
-    status TEXT NOT NULL,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
-);
-"""
-)
+    )
+    cursor.execute(
+        """
+    CREATE TABLE IF NOT EXISTS user_allergens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        allergen_name TEXT NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+    );
+    """
+    )
+    cursor.execute(
+        """
+    CREATE TABLE IF NOT EXISTS search_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        product_name TEXT,
+        ingredients_text TEXT NOT NULL,
+        status TEXT NOT NULL,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+    );
+    """
+    )
+    conn.commit()
+    conn.close()
+
+
+init_db()
 
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 if GEMINI_KEY:
@@ -136,16 +140,21 @@ def check():
         dietary_restriction = "none"
 
         if user_id:
-            rows = db.execute(
-                "SELECT allergen_name FROM user_allergens WHERE user_id = ?", user_id
-            )
+            conn = get_db()
+            cursor = conn.cursor()
+
+            rows = cursor.execute(
+                "SELECT allergen_name FROM user_allergens WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
             user_allergens = [r["allergen_name"] for r in rows]
 
-            user_data = db.execute(
-                "SELECT dietary_restriction FROM users WHERE id = ?", user_id
-            )
-            if user_data and user_data[0].get("dietary_restriction"):
-                dietary_restriction = user_data[0]["dietary_restriction"]
+            user_data = cursor.execute(
+                "SELECT dietary_restriction FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if user_data and user_data["dietary_restriction"]:
+                dietary_restriction = user_data["dietary_restriction"]
+            conn.close()
 
         results = check_ingredients_safety(
             text_input, user_allergens, dietary_restriction
@@ -153,13 +162,14 @@ def check():
 
         if user_id:
             status = "Safe" if results["is_safe"] else "Warning"
-            db.execute(
+            conn = get_db()
+            cursor = conn.cursor()
+            cursor.execute(
                 "INSERT INTO search_history (user_id, product_name, ingredients_text, status) VALUES (?, ?, ?, ?)",
-                user_id,
-                product_name,
-                text_input,
-                status,
+                (user_id, product_name, text_input, status),
             )
+            conn.commit()
+            conn.close()
 
         return render_template(
             "check.html",
@@ -204,10 +214,12 @@ def history():
     user_id = session.get("user_id")
     if not user_id:
         return redirect("/login")
-    scans = db.execute(
+    conn = get_db()
+    scans = conn.execute(
         "SELECT * FROM search_history WHERE user_id = ? ORDER BY timestamp DESC",
-        user_id,
-    )
+        (user_id,),
+    ).fetchall()
+    conn.close()
     return render_template("history.html", scans=scans)
 
 
@@ -216,10 +228,14 @@ def profile():
     user_id = session.get("user_id")
     if not user_id:
         return redirect("/login")
-    user = db.execute("SELECT * FROM users WHERE id = ?", user_id)[0]
-    allergens = db.execute(
-        "SELECT allergen_name FROM user_allergens WHERE user_id = ?", user_id
-    )
+    conn = get_db()
+    user = conn.execute(
+        "SELECT * FROM users WHERE id = ?", (user_id,)
+    ).fetchone()
+    allergens = conn.execute(
+        "SELECT allergen_name FROM user_allergens WHERE user_id = ?", (user_id,)
+    ).fetchall()
+    conn.close()
     return render_template("profile.html", user=user, allergens=allergens)
 
 
@@ -243,27 +259,30 @@ def register():
             return render_template("register.html")
 
         hash_pw = generate_password_hash(password)
+        conn = get_db()
+        cursor = conn.cursor()
         try:
-            user_id = db.execute(
+            cursor.execute(
                 "INSERT INTO users (username, hash, lang, dietary_restriction) VALUES (?, ?, ?, ?)",
-                username,
-                hash_pw,
-                curr_lang,
-                dietary_restriction,
+                (username, hash_pw, curr_lang, dietary_restriction),
             )
+            conn.commit()
+            user_id = cursor.lastrowid
         except Exception:
+            conn.close()
             flash("Username exists / اسم المستخدم مسجل بالفعل", "danger")
             return render_template("register.html")
 
         if allergens:
             for item in allergens.split(","):
                 if item.strip():
-                    db.execute(
+                    cursor.execute(
                         "INSERT INTO user_allergens (user_id, allergen_name) VALUES (?, ?)",
-                        user_id,
-                        item.strip().lower(),
+                        (user_id, item.strip().lower()),
                     )
+            conn.commit()
 
+        conn.close()
         session["user_id"] = user_id
         return redirect("/")
 
@@ -277,13 +296,18 @@ def login():
         username = request.form.get("username")
         password = request.form.get("password")
 
-        rows = db.execute("SELECT * FROM users WHERE username = ?", username)
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT * FROM users WHERE username = ?", (username,)
+        ).fetchall()
+        conn.close()
+
         if len(rows) != 1 or not check_password_hash(rows[0]["hash"], password):
             flash("Invalid credentials", "danger")
             return render_template("login.html")
 
         session["user_id"] = rows[0]["id"]
-        session["lang"] = rows[0].get("lang", "en")
+        session["lang"] = rows[0]["lang"] if rows[0]["lang"] else "en"
         return redirect("/")
 
     return render_template("login.html")
