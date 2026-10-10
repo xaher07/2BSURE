@@ -1,7 +1,6 @@
 import os
 from cs50 import SQL
 from flask import Flask, flash, jsonify, redirect, render_template, request, session
-from flask_session import Session
 import google.generativeai as genai
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
@@ -16,13 +15,15 @@ from helpers import (
 from translations import TRANSLATIONS
 
 app = Flask(__name__)
-app.config["SESSION_PERMANENT"] = False
-app.config["SESSION_TYPE"] = "filesystem"
+
+# استخدام Cookie-based Sessions بدلاً من Flask-Session للتوافق التام مع Vercel
+app.secret_key = os.environ.get("SECRET_KEY", "2bsure_super_secret_key_123")
+
 app.config["UPLOAD_FOLDER"] = (
     "/tmp" if os.environ.get("VERCEL") else "static/uploads"
 )
-Session(app)
 
+# تهيئة مسار قاعدة البيانات للعمل على البيئة السحابية بدون أخطاء صلاحيات الكتابة
 db_path = (
     "sqlite:///safety.db"
     if not os.environ.get("VERCEL")
@@ -32,7 +33,7 @@ db = SQL(db_path)
 
 os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
-# إنشاء الجداول السحابية تلقائياً
+# إنشاء الجداول تلقائياً عند التشغيل الأول
 db.execute(
     """
 CREATE TABLE IF NOT EXISTS users (
@@ -106,7 +107,6 @@ def check():
         barcode_input = request.form.get("barcode", "")
         product_name = "Custom Scan"
 
-        # 1. تحليل الصورة باستخدام الذكاء الاصطناعي (Gemini Vision)
         if "image" in request.files:
             file = request.files["image"]
             if file and file.filename != "":
@@ -122,7 +122,6 @@ def check():
                     text_input = "Water, Sugar, Milk powder, Natural flavors"
                     product_name = "Scanned Label (Fallback)"
 
-        # 2. البحث بالباروكود العالمي
         if barcode_input and not text_input:
             fetched_data = fetch_ingredients_by_barcode(barcode_input)
             if fetched_data and fetched_data.get("ingredients"):
