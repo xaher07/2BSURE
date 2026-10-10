@@ -1,5 +1,4 @@
 Flask
-cs50
 werkzeug
 requests
 google-generativeai
