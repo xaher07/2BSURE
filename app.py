@@ -17,9 +17,14 @@ from translations import TRANSLATIONS
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "2bsure_super_secret_key_123")
 
-app.config["UPLOAD_FOLDER"] = (
-    "/tmp" if os.environ.get("VERCEL") else "static/uploads"
-)
+# التوجيه الإجباري لمجلد المؤقت على Vercel لتجنب خطأ Read-only
+if os.environ.get("VERCEL"):
+    app.config["UPLOAD_FOLDER"] = "/tmp"
+    DB_FILE = "/tmp/safety.db"
+else:
+    app.config["UPLOAD_FOLDER"] = "static/uploads"
+    DB_FILE = "safety.db"
+
 os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
 # مسار قاعدة البيانات
