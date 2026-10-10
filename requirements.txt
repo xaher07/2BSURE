@@ -1,0 +1,6 @@
+Flask
+Flask-Session
+cs50
+werkzeug
+requests
+google-generativeai
